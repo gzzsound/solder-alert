@@ -2,29 +2,37 @@
 #include "RunningMedian.h"
 
 #define SAMPLE_SIZE 3
-#define ALERT_AFTER_MINUTES 1
+#define ALERT_AFTER_MINUTES 10
 #define SAFEGUARD_ALERT_AFTER_MINUTES 60
-#define BUZZER 8
-#define UPDATE_FREQUENCY 20
-#define SAMPLING_FREQUENCY 200
+#define BUZZER_PIN 8
+#define PHOTOCELL_PIN A0
+#define MEDIAN_SAMPLING_FREQUENCY 200
+#define SAMPLING_FREQUENCY 30
+#define TONE_INTERVALL_MILLIS 300
 
-int photocellPin = A0;
 unsigned long triggerAlertAt = -1;
 unsigned long safeguardAlertAt = -1;
-bool inUse = false;
-
-CircularBuffer<int,SAMPLE_SIZE> samples;
-RunningMedian samplesMedian = RunningMedian(10);
 unsigned long lastSampleAt = -1;
+unsigned long lastMedianSampleAt = -1;
+unsigned long swapToneAt = -1;
+
+bool inUse = false;
+bool playAlert = false;
+bool toneState = 0;
+
+CircularBuffer<int,SAMPLE_SIZE> medianSamples;
+RunningMedian samples = RunningMedian(10);
 
 void setup() {
   Serial.begin(9600);
-  pinMode(BUZZER, OUTPUT);  
+  pinMode(BUZZER_PIN, OUTPUT);  
   pinMode(LED_BUILTIN, OUTPUT);
   digitalWrite(LED_BUILTIN, HIGH);
   triggerAlertAt = millis() + milisecondsFor(ALERT_AFTER_MINUTES);
   safeguardAlertAt = millis() + milisecondsFor(SAFEGUARD_ALERT_AFTER_MINUTES);
   lastSampleAt = millis();
+  lastMedianSampleAt = millis();
+  swapToneAt = millis();
 }
 
 unsigned long milisecondsFor(long minutes){
@@ -32,37 +40,52 @@ unsigned long milisecondsFor(long minutes){
 }
 
 void loop() { 
-  int v = analogRead(photocellPin); 
-  samplesMedian.add(v);  
-  int state = parseSamples();
+  addSample();
+  
+  processState( parseSamples() );
 
+  checkAlerts();
+  
+  toneIt();
+}
+
+void addSample(){
+  if(millis() > lastSampleAt){
+    samples.add( analogRead(PHOTOCELL_PIN) );
+    addMedianSample( samples.getMedian() );
+    
+    lastSampleAt = millis() + SAMPLING_FREQUENCY;
+  }
+}
+
+void addMedianSample(long v){
+  if(millis() > lastMedianSampleAt){
+    medianSamples.push(v);
+    lastMedianSampleAt = millis() + MEDIAN_SAMPLING_FREQUENCY;
+  }
+}
+
+void processState(int state){
   switch(state){
     case -1:
-      Serial.println("LED_BUILTIN, HIGH");
-      digitalWrite(13, HIGH);
+      digitalWrite(LED_BUILTIN, HIGH);
       inUse = false;
       startCounterForAlert();
       break;
     case 1:
-    Serial.println("LED_BUILTIN, LOW");
-      digitalWrite(13, LOW);
+      digitalWrite(LED_BUILTIN, LOW);
       inUse = true;
       resetAlert();
       break;
     case 2:
+      // state did not change
     break;
   }
-   checkAlertTrigger();
-   checkSafeGuardAlertTrigger();
-   delay(UPDATE_FREQUENCY);
-   addSample(samplesMedian.getMedian());
 }
 
-void addSample(long v){
-  if(millis() > lastSampleAt){
-    samples.push(v);
-    lastSampleAt = millis() + SAMPLING_FREQUENCY;
-  }
+void checkAlerts(){
+  checkAlertTrigger();
+  checkSafeGuardAlertTrigger();
 }
 
 void startCounterForAlert(){
@@ -84,27 +107,41 @@ void checkAlertTrigger(){
 }
 
 void buzzThis(){
-  tone(BUZZER, 1000);  
+  playAlert = true;
 }
 
 void stopBuzz(){
-  noTone(BUZZER);
+  playAlert = false;
   safeguardAlertAt = millis() + milisecondsFor(SAFEGUARD_ALERT_AFTER_MINUTES);
+}
+
+void toneIt(){
+  if(playAlert == true){
+    if(millis() > swapToneAt){
+      toneState = !toneState;
+      swapToneAt = millis() + TONE_INTERVALL_MILLIS;
+      toneState ? tone(BUZZER_PIN,330) : noTone(BUZZER_PIN);
+    }
+  }else{
+    noTone(BUZZER_PIN);
+  }
 }
 
 int parseSamples(){
   int returnValue = 2;
-  if(samples.size() == SAMPLE_SIZE){
-    if(abs(samples[SAMPLE_SIZE-1]-samples[SAMPLE_SIZE-2])<20 && abs(samples[0] - samples[SAMPLE_SIZE-1]) > 20){
-      if(samples[0] < samples[SAMPLE_SIZE-1]){
-        returnValue = 1;
-      }else{
-        returnValue = -1;
-      }
+  if(medianSamples.size() < SAMPLE_SIZE){ return returnValue; }
+
+  if( abs(medianSamples.last() - medianSamples[SAMPLE_SIZE-2] ) < 20 
+        && abs(medianSamples.first() - medianSamples.last()) > 20 ){
+    if(medianSamples.first() < medianSamples.last()){
+      returnValue = 1;
     }else{
-      returnValue = 2;
-    }  
-  }
+      returnValue = -1;
+    }
+  }else{
+    returnValue = 2;
+  }  
+  
   return returnValue;
 }
 
